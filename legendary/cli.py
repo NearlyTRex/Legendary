@@ -33,7 +33,7 @@ from legendary.lfs.wine_helpers import read_registry, get_shell_folders, case_in
 # todo custom formatter for cli logger (clean info, highlighted error/warning)
 logging.basicConfig(
     format='[%(name)s] %(levelname)s: %(message)s',
-    level=logging.INFO
+    level=logging.WARNING
 )
 logger = logging.getLogger('cli')
 
