@@ -53,7 +53,7 @@ from legendary.utils.selective_dl import get_sdl_appname
 # todo custom formatter for cli logger (clean info, highlighted error/warning)
 logging.basicConfig(
     format='[%(name)s] %(levelname)s: %(message)s',
-    level=logging.INFO
+    level=logging.WARNING
 )
 logger = logging.getLogger('cli')
 
