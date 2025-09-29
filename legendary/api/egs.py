@@ -159,25 +159,49 @@ class EPCAPI:
         return r.content
 
     def get_external_auths(self):
-        user_id = self.user.get('account_id')
-        r = self.session.get(f'https://{self._oauth_host}/account/api/public/account/{user_id}/externalAuths',
-                             timeout=self.request_timeout)
-        r.raise_for_status()
-        return r.json()
+        try:
+            user_id = self.user.get('account_id')
+            r = self.session.get(f'https://{self._oauth_host}/account/api/public/account/{user_id}/externalAuths',
+                                 timeout=self.request_timeout)
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.HTTPError as e:
+            logging.error(f'HTTP error getting external auths: {e.response.status_code} {e.response.reason}')
+            logging.error(f'URL: {e.response.url}')
+            return []
+        except requests.exceptions.RequestException as e:
+            logging.error(f'Request error getting external auths: {e}')
+            return []
 
     def get_game_assets(self, platform='Windows', label='Live'):
-        r = self.session.get(f'https://{self._launcher_host}/launcher/api/public/assets/{platform}',
-                             params=dict(label=label), timeout=self.request_timeout)
-        r.raise_for_status()
-        return r.json()
+        try:
+            r = self.session.get(f'https://{self._launcher_host}/launcher/api/public/assets/{platform}',
+                                 params=dict(label=label), timeout=self.request_timeout)
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.HTTPError as e:
+            logging.error(f'HTTP error getting game assets: {e.response.status_code} {e.response.reason}')
+            logging.error(f'URL: {e.response.url}')
+            return []
+        except requests.exceptions.RequestException as e:
+            logging.error(f'Request error getting game assets: {e}')
+            return []
 
     def get_game_manifest(self, namespace, catalog_item_id, app_name, platform='Windows', label='Live'):
-        r = self.session.get(f'https://{self._launcher_host}/launcher/api/public/assets/v2/platform'
-                             f'/{platform}/namespace/{namespace}/catalogItem/{catalog_item_id}/app'
-                             f'/{app_name}/label/{label}',
-                             timeout=self.request_timeout)
-        r.raise_for_status()
-        return r.json()
+        try:
+            r = self.session.get(f'https://{self._launcher_host}/launcher/api/public/assets/v2/platform'
+                                 f'/{platform}/namespace/{namespace}/catalogItem/{catalog_item_id}/app'
+                                 f'/{app_name}/label/{label}',
+                                 timeout=self.request_timeout)
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.HTTPError as e:
+            logging.error(f'HTTP error getting game manifest: {e.response.status_code} {e.response.reason}')
+            logging.error(f'URL: {e.response.url}')
+            return None
+        except requests.exceptions.RequestException as e:
+            logging.error(f'Request error getting game manifest: {e}')
+            return None
 
     def get_launcher_manifests(self, platform='Windows', label=None):
         r = self.session.get(f'https://{self._launcher_host}/launcher/api/public/assets/v2/platform/'
@@ -233,24 +257,29 @@ class EPCAPI:
         return r.json()
 
     def get_library_items(self, include_metadata=True):
-        records = []
-        r = self.session.get(f'https://{self._library_host}/library/api/public/items',
-                             params=dict(includeMetadata=include_metadata),
-                             timeout=self.request_timeout)
-        r.raise_for_status()
-        j = r.json()
-        records.extend(j['records'])
-
-        # Fetch remaining library entries as long as there is a cursor
-        while cursor := j['responseMetadata'].get('nextCursor', None):
+        try:
+            records = []
             r = self.session.get(f'https://{self._library_host}/library/api/public/items',
-                                 params=dict(includeMetadata=include_metadata, cursor=cursor),
+                                 params=dict(includeMetadata=include_metadata),
                                  timeout=self.request_timeout)
             r.raise_for_status()
             j = r.json()
             records.extend(j['records'])
-
-        return records
+            while cursor := j['responseMetadata'].get('nextCursor', None):
+                r = self.session.get(f'https://{self._library_host}/library/api/public/items',
+                                     params=dict(includeMetadata=include_metadata, cursor=cursor),
+                                     timeout=self.request_timeout)
+                r.raise_for_status()
+                j = r.json()
+                records.extend(j['records'])
+            return records
+        except requests.exceptions.HTTPError as e:
+            logging.error(f'HTTP error getting library items: {e.response.status_code} {e.response.reason}')
+            logging.error(f'URL: {e.response.url}')
+            return []
+        except requests.exceptions.RequestException as e:
+            logging.error(f'Request error getting library items: {e}')
+            return []
 
     def get_user_cloud_saves(self, app_name='', manifests=False, filenames=None):
         if app_name:
