@@ -314,6 +314,95 @@ class LegendaryCore:
 
         return update_info.get('game_wiki', {}).get(app_name, {}).get(sys_platform)
 
+    def get_user_achievements(self, namespace: str, update: bool = False):
+        if not (achievements := self.lgd.achievements):
+            achievements = {}
+
+        if not achievements or not achievements.get(namespace, None) or update:
+            response = self.egs.get_game_achievements_user(namespace)
+            records = response['data']['PlayerAchievement']['playerAchievementGameRecordsBySandbox']['records']
+            achievements[namespace] = None
+            if records:
+                achievements[namespace] = records[0]
+            self.lgd.achievements = achievements
+
+        return self.lgd.achievements[namespace]
+
+    def get_achievements(self, game: Game, update: bool = False):
+        if not game.achievements.achievements:
+            return None
+
+        user_achievements = self.get_user_achievements(game.namespace, update)
+        user_unlocked = {}
+        if user_achievements:
+            user_unlocked = {
+                ach['playerAchievement']['achievementName']: ach['playerAchievement'] for ach in
+                user_achievements['playerAchievements']
+            }
+
+        achievements = {
+            'total_achievements': game.achievements.total_achievements,
+            'total_product_xp': game.achievements.total_product_xp,
+            'achievement_sets': game.achievements.achievement_sets,
+            'platinum_rarity': game.achievements.platinum_rarity,
+            'completed': [],
+            'in_progress': [],
+            'uninitiated': [],
+            'hidden': [],
+        }
+        achievements.update({
+            'user_unlocked': user_achievements['totalUnlocked'] if user_achievements else 0,
+            'user_xp': user_achievements['totalXP'] if user_achievements else 0,
+            'user_awards': user_achievements['playerAwards'] if user_achievements else [],
+        })
+
+        for item in game.achievements.achievements:
+            game_ach = item['achievement']
+            is_unlocked = game_ach['name'] in user_unlocked
+
+            _unlocked = False
+            _progress = 0.0
+            _unlock_date = None
+            if is_unlocked:
+                user_ach = user_unlocked[game_ach['name']]
+                _unlocked = user_ach['unlocked']
+                _progress = float(user_ach['progress'])
+                _unlock_date = user_ach['unlockDate']
+                _unlock_date = datetime.fromisoformat(_unlock_date[:-1]).replace(
+                    tzinfo=timezone.utc) if _unlock_date != "N/A" else None
+
+            data = {
+                'name': game_ach['name'],
+                'is_base': game_ach['isBase'],
+                'hidden': False if is_unlocked else game_ach['hidden'],
+                'xp': game_ach['XP'],
+                'unlocked': _unlocked,
+                'progress': _progress,
+                'unlock_date': _unlock_date if _unlock_date else None,
+                'display_name': game_ach['unlockedDisplayName'] if is_unlocked else game_ach['lockedDisplayName'],
+                'description': game_ach['unlockedDescription'] if is_unlocked else game_ach['lockedDescription'],
+                'icon_id': game_ach['unlockedIconId'] if is_unlocked else game_ach['lockedIconId'],
+                'icon_link': game_ach['unlockedIconLink'] if is_unlocked else game_ach['lockedIconLink'],
+                'tier': game_ach['tier'],
+                'rarity': game_ach['rarity'],
+            }
+
+            if data['unlocked']:
+                achievements['completed'].append(data)
+            elif 0.0 < data['progress'] < 1.0:
+                achievements['in_progress'].append(data)
+            elif not data['hidden'] and data['progress'] == 0.0:
+                achievements['uninitiated'].append(data)
+            elif data['hidden']:
+                achievements['hidden'].append(data)
+
+        achievements['completed'] = sorted(achievements['completed'], key=lambda a: a['unlock_date'], reverse=True)
+        achievements['in_progress'] = sorted(achievements['in_progress'], key=lambda a: a['progress'], reverse=True)
+        achievements['uninitiated'] = sorted(achievements['uninitiated'], key=lambda a: a['xp'], reverse=False)
+        achievements['hidden'] = sorted(achievements['hidden'], key=lambda a: a['xp'], reverse=False)
+
+        return achievements
+
     def get_sdl_data(self, app_name, platform='Windows'):
         if platform not in ('Win32', 'Windows'):
             app_name = f'{app_name}_{platform}'
@@ -359,6 +448,11 @@ class LegendaryCore:
                     self.egs.get_game_assets(platform=platform)
                 ]
             })
+
+            # only get entitlements if there was an asset update
+            if self.lgd.assets != assets or not self.lgd.entitlements:
+                self.log.info('Updating entitlements.')
+                self.lgd.entitlements = self.egs.get_user_entitlements_full()
 
             # only save (and write to disk) if there were changes
             if self.lgd.assets != assets:
@@ -431,15 +525,16 @@ class LegendaryCore:
                 continue
 
             game = self.lgd.get_game_meta(app_name)
-            asset_updated = sidecar_updated = False
+            asset_updated = sidecar_updated = achievements_updated = False
             if game:
                 asset_updated = any(game.app_version(_p) != app_assets[_p].build_version for _p in app_assets.keys())
                 # assuming sidecar data is the same for all platforms, just check the baseline (Windows) for updates.
                 sidecar_updated = (app_assets['Windows'].sidecar_rev > 0 and
                                    (not game.sidecar or game.sidecar.rev != app_assets['Windows'].sidecar_rev))
+                achievements_updated = not game.achievements or asset_updated
                 games[app_name] = game
 
-            if update_assets and (not game or force_refresh or (game and (asset_updated or sidecar_updated))):
+            if update_assets and (not game or force_refresh or (game and (asset_updated or sidecar_updated or achievements_updated))):
                 self.log.debug(f'Scheduling metadata update for {app_name}')
                 # namespace/catalog item are the same for all platforms, so we can just use the first one
                 _ga = next(iter(app_assets.values()))
@@ -463,8 +558,12 @@ class LegendaryCore:
                     sidecar_json = json.loads(manifest_info['sidecar']['config'])
                     sidecar = Sidecar(config=sidecar_json, rev=manifest_info['sidecar']['rvn'])
 
+            self.log.debug(f'Updating achivement information for {app_name}...')
+            achievements_api_response = self.egs.get_game_achievements(namespace)
+            achievements = Achievements.from_egs_json(achievements_api_response)
+
             game = Game(app_name=app_name, app_title=eg_meta['title'], metadata=eg_meta, asset_infos=assets[app_name],
-                        sidecar=sidecar)
+                        sidecar=sidecar, achievements=achievements)
             self.lgd.set_game_meta(game.app_name, game)
             games[app_name] = game
             try:
@@ -829,6 +928,27 @@ class LegendaryCore:
             parameters.extend(parse_qsl(extra_args))
 
         return f'link2ea://launchgame/{app_name}?{urlencode(parameters)}'
+    
+    def get_ubisoft_uri(self, app_name: str, offline: bool = False) -> str:
+        token = '0' if offline else self.egs.get_game_token()['code']
+
+        user_name = self.lgd.userdata['displayName']
+        account_id = self.lgd.userdata['account_id']
+        parameters = [
+            ('AUTH_PASSWORD', token),
+            ('AUTH_TYPE', 'exchangecode'),
+            ('epicusername', user_name),
+            ('epicuserid', account_id),
+            ('epiclocale', self.language_code),
+        ]
+
+        game = self.get_game(app_name)
+        game_id = game.metadata.get('customAttributes', {}).get('GameID', {}).get('value') or app_name
+        extra_args = game.metadata.get('customAttributes', {}).get('AdditionalCommandline', {}).get('value')
+        if extra_args:
+            parameters.extend(parse_qsl(extra_args))
+
+        return f'uplay://launch/{game_id}?{urlencode(parameters)}'
 
     def get_save_games(self, app_name: str = ''):
         savegames = self.egs.get_user_cloud_saves(app_name, manifests=not not app_name)
@@ -910,6 +1030,11 @@ class LegendaryCore:
             if not wine_pfx:
                 wine_pfx = self.lgd.config.get('default.env', 'WINEPREFIX', fallback=None)
                 wine_pfx = self.lgd.config.get('default', 'wine_prefix', fallback=wine_pfx)
+            # Proton is not officially supported, but people still use it, so look for it
+            if not wine_pfx:
+                proton_pfx = self.lgd.config.get('default.env', 'STEAM_COMPAT_DATA_PATH', fallback=None)
+                if proton_pfx:
+                    wine_pfx = f'{proton_pfx}/pfx'
 
             # If we still didn't find anything, try to read the prefix from the environment variables of this process
             if not wine_pfx and sys_platform == 'darwin':
@@ -1253,6 +1378,8 @@ class LegendaryCore:
             raise ValueError('Manifest response has more than one element!')
 
         manifest_hash = m_api_r['elements'][0]['hash']
+        manifest_is_preloaded: bool = m_api_r['elements'][0].get('isPreloaded') or False
+        manifest_secrets: dict = m_api_r['elements'][0].get('secrets') or dict()
         base_urls = []
         manifest_urls = []
         for manifest in m_api_r['elements'][0]['manifests']:
@@ -1266,10 +1393,10 @@ class LegendaryCore:
             else:
                 manifest_urls.append(manifest['uri'])
 
-        return manifest_urls, base_urls, manifest_hash
+        return manifest_urls, base_urls, manifest_hash, manifest_is_preloaded, manifest_secrets
 
     def get_cdn_manifest(self, game, platform='Windows', disable_https=False):
-        manifest_urls, base_urls, manifest_hash = self.get_cdn_urls(game, platform)
+        manifest_urls, base_urls, manifest_hash, manifest_is_preloaded, manifest_secrets = self.get_cdn_urls(game, platform)
         if not manifest_urls:
             raise ValueError('No manifest URLs returned by API')
 
@@ -1297,7 +1424,7 @@ class LegendaryCore:
         if sha1(manifest_bytes).hexdigest() != manifest_hash:
             raise ValueError('Manifest sha hash mismatch!')
 
-        return manifest_bytes, base_urls
+        return manifest_bytes, base_urls, manifest_is_preloaded, manifest_secrets
 
     def get_uri_manifest(self, uri):
         if uri.startswith('http'):
@@ -1359,11 +1486,13 @@ class LegendaryCore:
         if override_manifest:
             self.log.info(f'Overriding manifest with "{override_manifest}"')
             new_manifest_data, _base_urls = self.get_uri_manifest(override_manifest)
+            # FIXME: Populate manifest secrets
+            manifest_secrets = dict()
             # if override manifest has a base URL use that instead
             if _base_urls:
                 base_urls = _base_urls
         else:
-            new_manifest_data, base_urls = self.get_cdn_manifest(game, platform, disable_https=disable_https)
+            new_manifest_data, base_urls, _, manifest_secrets = self.get_cdn_manifest(game, platform, disable_https=disable_https)
             # overwrite base urls in metadata with current ones to avoid using old/dead CDNs
             game.base_urls = base_urls
             # save base urls to game metadata
@@ -1371,9 +1500,12 @@ class LegendaryCore:
 
         self.log.info('Parsing game manifest...')
         new_manifest = self.load_manifest(new_manifest_data)
+        if not new_manifest.decrypt(manifest_secrets):
+            raise ValueError('Decrypting manifest failed, key was missing, preloading isnt implemented yet')
+
         self.log.debug(f'Base urls: {base_urls}')
         # save manifest with version name as well for testing/downgrading/etc.
-        self.lgd.save_manifest(game.app_name, new_manifest_data,
+        self.lgd.save_manifest(game.app_name, new_manifest,
                                version=new_manifest.meta.build_version,
                                platform=platform)
 
@@ -1447,7 +1579,7 @@ class LegendaryCore:
             if not repair_use_latest and old_manifest:
                 # use installed manifest for repairs instead of updating
                 new_manifest = old_manifest
-                old_manifest = None
+            old_manifest = None
 
             filename = clean_filename(f'{game.app_name}.repair')
             resume_file = os.path.join(self.lgd.get_tmp_path(), filename)
@@ -1496,9 +1628,9 @@ class LegendaryCore:
         if not max_workers:
             max_workers = self.lgd.config.getint('Legendary', 'max_workers', fallback=0)
 
-        dlm = DLManager(install_path, base_url, resume_file=resume_file, status_q=status_q,
+        dlm = DLManager(install_path, base_url, manifest_secrets, resume_file=resume_file, status_q=status_q,
                         max_shared_memory=max_shm * 1024 * 1024, max_workers=max_workers,
-                        dl_timeout=dl_timeout, bind_ip=bind_ip)
+                        dl_timeout=dl_timeout, bind_ip=bind_ip, case_insensitive=platform.startswith('Win'))
         anlres = dlm.run_analysis(manifest=new_manifest, old_manifest=old_manifest,
                                   patch=not disable_patching, resume=not force,
                                   file_prefix_filter=file_prefix_filter,
@@ -1697,7 +1829,8 @@ class LegendaryCore:
                     fm.filename for fm in manifest.file_manifest_list.elements if
                     not fm.install_tags or any(t in installed_game.install_tags for t in fm.install_tags)
                 ]
-                if not delete_filelist(installed_game.install_path, filelist, delete_root_directory):
+                if not delete_filelist(installed_game.install_path, filelist, delete_root_directory,
+                                       case_insensitive=installed_game.platform.startswith('Win')):
                     self.log.error(f'Deleting "{installed_game.install_path}" failed, please remove manually.')
             except Exception as e:
                 self.log.error(f'Deleting failed with {e!r}, please remove {installed_game.install_path} manually.')
@@ -1717,7 +1850,10 @@ class LegendaryCore:
             and os.path.exists(os.path.join(installed_game.install_path, fm.filename))
         ]
 
-        if not delete_filelist(installed_game.install_path, filelist):
+        if not delete_filelist(
+                installed_game.install_path, filelist,
+                case_insensitive=installed_game.platform.startswith('Win')
+        ):
             self.log.warning(f'Deleting some deselected files failed, please check/remove manually.')
 
     def prereq_installed(self, app_name):
@@ -1761,9 +1897,10 @@ class LegendaryCore:
                 if not needs_verify:
                     self.log.debug(f'No in-progress installation found, assuming complete...')
 
+        manifest_secrets = dict()
         if not manifest_data:
             self.log.info(f'Downloading latest manifest for "{game.app_name}"')
-            manifest_data, base_urls = self.get_cdn_manifest(game)
+            manifest_data, base_urls, _, manifest_secrets = self.get_cdn_manifest(game)
             if not game.base_urls:
                 game.base_urls = base_urls
                 self.lgd.set_game_meta(game.app_name, game)
@@ -1773,7 +1910,8 @@ class LegendaryCore:
 
         # parse and save manifest to disk for verification step of import
         new_manifest = self.load_manifest(manifest_data)
-        self.lgd.save_manifest(game.app_name, manifest_data,
+        new_manifest.decrypt(manifest_secrets)
+        self.lgd.save_manifest(game.app_name, new_manifest,
                                version=new_manifest.meta.build_version, platform=platform)
         install_size = sum(fm.file_size for fm in new_manifest.file_manifest_list.elements)
 
@@ -1848,7 +1986,7 @@ class LegendaryCore:
         with open(manifest_filename, 'rb') as f:
             manifest_data = f.read()
         new_manifest = self.load_manifest(manifest_data)
-        self.lgd.save_manifest(lgd_igame.app_name, manifest_data,
+        self.lgd.save_manifest(lgd_igame.app_name, new_manifest,
                                version=new_manifest.meta.build_version,
                                platform='Windows')
 
@@ -2040,7 +2178,7 @@ class LegendaryCore:
         if not self.logged_in:
             self.egs.start_session(client_credentials=True)
 
-        _manifest, base_urls = self.get_cdn_manifest(EOSOverlayApp)
+        _manifest, base_urls, _, manifest_secrets = self.get_cdn_manifest(EOSOverlayApp)
         manifest = self.load_manifest(_manifest)
 
         if igame := self.lgd.get_overlay_install_info():
@@ -2048,7 +2186,7 @@ class LegendaryCore:
         else:
             path = path or os.path.join(self.get_default_install_dir(), '.overlay')
 
-        dlm = DLManager(path, base_urls[0])
+        dlm = DLManager(path, base_urls[0], manifest_secrets)
         analysis_result = dlm.run_analysis(manifest=manifest)
 
         install_size = analysis_result.install_size
@@ -2097,7 +2235,7 @@ class LegendaryCore:
         if os.path.exists(path):
             raise FileExistsError(f'Bottle {bottle_name} already exists')
 
-        dlm = DLManager(path, base_url)
+        dlm = DLManager(path, base_url, dict())
         analysis_result = dlm.run_analysis(manifest=manifest)
 
         install_size = analysis_result.install_size

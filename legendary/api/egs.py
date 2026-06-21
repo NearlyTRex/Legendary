@@ -28,10 +28,8 @@ class EPCAPI:
     _ecommerce_host = 'ecommerceintegration-public-service-ecomprod02.ol.epicgames.com'
     _datastorage_host = 'datastorage-public-service-liveegs.live.use1a.on.epicgames.com'
     _library_host = 'library-service.live.use1a.on.epicgames.com'
-    # Using the actual store host with a user-agent newer than 14.0.8 leads to a CF verification page,
-    # but the dedicated graphql host works fine.
-    # _store_gql_host = 'launcher.store.epicgames.com'
-    _store_gql_host = 'graphql.epicgames.com'
+
+    _store_gql_host = 'launcher.store.epicgames.com'
     _artifact_service_host = 'artifact-public-service-prod.beee.live.use1a.on.epicgames.com'
 
     def __init__(self, lc='en', cc='US', timeout=10.0):
@@ -39,11 +37,13 @@ class EPCAPI:
 
         self.session = requests.session()
         self.session.headers['User-Agent'] = self._user_agent
+        self.session.auth = lambda r: r
         # increase maximum pool size for multithreaded metadata requests
         self.session.mount('https://', requests.adapters.HTTPAdapter(pool_maxsize=16))
 
         self.unauth_session = requests.session()
         self.unauth_session.headers['User-Agent'] = self._user_agent
+        self.unauth_session.auth = lambda r: r
 
         self._oauth_basic = HTTPBasicAuth(self._user_basic, self._pw_basic)
 
@@ -280,6 +280,28 @@ class EPCAPI:
         except requests.exceptions.RequestException as e:
             logging.error(f'Request error getting library items: {e}')
             return []
+
+    def get_game_achievements(self, namespace):
+        r = self.session.post(f'https://{self._store_gql_host}/graphql',
+                              headers={'user-agent': self._store_user_agent},
+                              json=dict(query=egl_game_achievements_query,
+                                        variables=dict(sandboxId=namespace,
+                                                       locale=self.language_code)),
+                              timeout=self.request_timeout)
+        r.raise_for_status()
+        return r.json()
+
+    def get_game_achievements_user(self, namespace):
+        user_id = self.user.get('account_id')
+        r = self.session.post(f'https://{self._store_gql_host}/graphql',
+                              headers={'user-agent': self._store_user_agent},
+                              json=dict(query=egl_game_achievements_user_query,
+                                        variables=dict(sandboxId=namespace,
+                                                       epicAccountId=user_id,
+                                                       locale=self.language_code)),
+                              timeout=self.request_timeout)
+        r.raise_for_status()
+        return r.json()
 
     def get_user_cloud_saves(self, app_name='', manifests=False, filenames=None):
         if app_name:

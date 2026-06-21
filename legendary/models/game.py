@@ -64,6 +64,41 @@ class Sidecar:
 
 
 @dataclass
+class Achievements:
+    namespace: str
+    total_achievements: int
+    total_product_xp: int
+    achievement_sets: List = field(default_factory=list)
+    platinum_rarity: Dict = field(default_factory=dict)
+    achievements: List = field(default_factory=list)
+
+    @classmethod
+    def from_egs_json(cls, json):
+        json = json['data']['Achievement']['productAchievementsRecordBySandbox']
+        tmp = cls(
+            namespace=json.get('sandboxId', ''),
+            total_achievements=json.get('totalAchievements', 0),
+            total_product_xp=json.get('totalProductXP', 0),
+            achievement_sets=json.get('achievementSets', []),
+            platinum_rarity=json.get('platinumRarity', {}),
+            achievements=json.get('achievements', []),
+        )
+        return tmp
+
+    @classmethod
+    def from_json(cls, json):
+        tmp = cls(
+            namespace=json.get('namespace', ''),
+            total_achievements=json.get('total_achievements', 0),
+            total_product_xp=json.get('total_product_xp', 0),
+            achievement_sets=json.get('achievement_sets', []),
+            platinum_rarity=json.get('platinum_rarity', {}),
+            achievements=json.get('achievements', []),
+        )
+        return tmp
+
+
+@dataclass
 class Game:
     """
     Combination of app asset and app metadata as stored on disk
@@ -75,6 +110,7 @@ class Game:
     base_urls: List[str] = field(default_factory=list)
     metadata: Dict = field(default_factory=dict)
     sidecar: Optional[Sidecar] = None
+    achievements: Optional[Achievements] = None
 
     def app_version(self, platform='Windows'):
         if platform not in self.asset_infos:
@@ -83,17 +119,21 @@ class Game:
 
     @property
     def is_dlc(self):
-        return self.metadata and 'mainGameItem' in self.metadata
+        return self.metadata is not None and 'mainGameItem' in self.metadata
+
+    @property
+    def is_ubisoft_game(self) -> bool:
+        return self.third_party_store is not None and self.third_party_store.lower() in ['ubisoftconnect']
 
     @property
     def is_origin_game(self) -> bool:
-        return self.third_party_store and self.third_party_store.lower() in ['origin', 'the ea app']
+        return self.third_party_store is not None and self.third_party_store.lower() in ['origin', 'the ea app']
 
     @property
     def third_party_store(self) -> Optional[str]:
         if not self.metadata:
             return None
-        return self.metadata.get('customAttributes', {}).get('ThirdPartyManagedApp', {}).get('value', None)
+        return self.metadata.get('customAttributes', {}).get('ThirdPartyManagedApp', {}).get('value', None) or self.metadata.get('customAttributes', {}).get('ThirdPartyManagedProvider', {}).get('value', None)
 
     @property
     def partner_link_type(self):
@@ -109,11 +149,11 @@ class Game:
 
     @property
     def supports_cloud_saves(self):
-        return self.metadata and (self.metadata.get('customAttributes', {}).get('CloudSaveFolder') is not None)
+        return self.metadata is not None and (self.metadata.get('customAttributes', {}).get('CloudSaveFolder') is not None)
 
     @property
     def supports_mac_cloud_saves(self):
-        return self.metadata and (self.metadata.get('customAttributes', {}).get('CloudSaveFolder_MAC') is not None)
+        return self.metadata is not None and (self.metadata.get('customAttributes', {}).get('CloudSaveFolder_MAC') is not None)
 
     @property
     def additional_command_line(self):
@@ -155,6 +195,9 @@ class Game:
         if sidecar := json.get('sidecar', None):
             tmp.sidecar = Sidecar.from_json(sidecar)
 
+        if achievements := json.get('achievements', None):
+            tmp.achievements = Achievements.from_json(achievements)
+
         tmp.base_urls = json.get('base_urls', list())
         return tmp
 
@@ -163,8 +206,10 @@ class Game:
         """This is just here so asset_infos gets turned into a dict as well"""
         assets_dictified = {k: v.__dict__ for k, v in self.asset_infos.items()}
         sidecar_dictified = self.sidecar.__dict__ if self.sidecar else None
+        achievements_dictified = self.achievements.__dict__ if self.achievements else None
         return dict(metadata=self.metadata, asset_infos=assets_dictified, app_name=self.app_name,
-                    app_title=self.app_title, base_urls=self.base_urls, sidecar=sidecar_dictified)
+                    app_title=self.app_title, base_urls=self.base_urls, sidecar=sidecar_dictified,
+                    achievements=achievements_dictified)
 
 
 @dataclass
@@ -192,6 +237,7 @@ class InstalledGame:
     uninstaller: Optional[Dict] = None
     requires_ot: bool = False
     save_path: Optional[str] = None
+    is_preloaded: bool = False
 
     @classmethod
     def from_json(cls, json):
@@ -218,6 +264,7 @@ class InstalledGame:
         tmp.install_size = json.get('install_size', 0)
         tmp.egl_guid = json.get('egl_guid', '')
         tmp.install_tags = json.get('install_tags', [])
+        tmp.is_preloaded = json.get('is_preloaded', False)
         return tmp
 
 

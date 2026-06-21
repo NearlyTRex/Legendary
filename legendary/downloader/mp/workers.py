@@ -12,6 +12,7 @@ from queue import Empty
 import requests
 from requests.adapters import HTTPAdapter, DEFAULT_POOLBLOCK
 
+from legendary.lfs.wine_helpers import case_insensitive_file_search
 from legendary.models.chunk import Chunk
 from legendary.models.downloading import (
     DownloaderTask, DownloaderTaskResult,
@@ -35,10 +36,11 @@ class BindingHTTPAdapter(HTTPAdapter):
 
 class DLWorker(Process):
     def __init__(self, name, queue, out_queue, shm, max_retries=7,
-                 logging_queue=None, dl_timeout=10, bind_addr=None):
+                 logging_queue=None, dl_timeout=10, bind_addr=None, secrets=dict()):
         super().__init__(name=name)
         self.q = queue
         self.o_q = out_queue
+        self.secrets = secrets
         self.session = requests.session()
         self.session.headers.update({
             'User-Agent': 'EpicGamesLauncher/11.0.1-14907503+++Portal+Release-Live Windows/10.0.19041.1.256.64bit'
@@ -107,7 +109,7 @@ class DLWorker(Process):
                         continue
                     else:
                         compressed = len(r.content)
-                        chunk = Chunk.read_buffer(r.content)
+                        chunk = Chunk.read_buffer(r.content, self.secrets)
                         break
                 else:
                     raise TimeoutError('Max retries reached')
@@ -147,7 +149,8 @@ class DLWorker(Process):
 
 
 class FileWorker(Process):
-    def __init__(self, queue, out_queue, base_path, shm, cache_path=None, logging_queue=None):
+    def __init__(self, queue, out_queue, base_path, shm, cache_path=None, logging_queue=None,
+                 case_insensitive: bool = True):
         super().__init__(name='FileWorker')
         self.q = queue
         self.o_q = out_queue
@@ -156,6 +159,7 @@ class FileWorker(Process):
         self.shm = SharedMemory(name=shm)
         self.log_level = logging.getLogger().level
         self.logging_queue = logging_queue
+        self.case_insensitive = case_insensitive
 
     def run(self):
         # we have to fix up the logger before we can start
@@ -187,11 +191,14 @@ class FileWorker(Process):
                     break
 
                 # make directories if required
-                path = os.path.split(j.filename)[0]
-                if not os.path.exists(os.path.join(self.base_path, path)):
-                    os.makedirs(os.path.join(self.base_path, path))
+                path, filename = os.path.split(j.filename)
+                file_dir = os.path.join(self.base_path, path)
+                if self.case_insensitive:
+                    file_dir = case_insensitive_file_search(file_dir)
+                if not os.path.exists(file_dir):
+                    os.makedirs(file_dir)
 
-                full_path = os.path.join(self.base_path, j.filename)
+                full_path = os.path.join(file_dir, filename)
 
                 if j.flags & TaskFlags.CREATE_EMPTY_FILE:  # just create an empty file
                     open(full_path, 'a').close()
@@ -230,7 +237,8 @@ class FileWorker(Process):
                             continue
 
                     try:
-                        os.rename(os.path.join(self.base_path, j.old_file), full_path)
+                        old_path = case_insensitive_file_search(os.path.join(self.base_path, j.old_file))
+                        os.rename(old_path, full_path)
                     except OSError as e:
                         logger.error(f'Renaming file failed: {e!r}')
                         self.o_q.put(WriterTaskResult(success=False, **j.__dict__))

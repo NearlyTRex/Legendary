@@ -66,9 +66,9 @@ class LegendaryCLI:
     @staticmethod
     def _print_json(data, pretty=False):
         if pretty:
-            print(json.dumps(data, indent=2, sort_keys=True))
+            print(json.dumps(data, indent=2, sort_keys=True, default=str))
         else:
-            print(json.dumps(data))
+            print(json.dumps(data, default=str))
 
     def auth(self, args):
         if args.auth_delete:
@@ -348,7 +348,7 @@ class LegendaryCLI:
             return
         elif args.app_name:
             args.app_name = self._resolve_aliases(args.app_name)
-
+        manifest_secrets = dict()
         # check if we even need to log in
         if args.override_manifest:
             logger.info(f'Loading manifest from "{args.override_manifest}"')
@@ -365,9 +365,12 @@ class LegendaryCLI:
             if not game:
                 logger.fatal(f'Could not fetch metadata for "{args.app_name}" (check spelling/account ownership)')
                 exit(1)
-            manifest_data, _ = self.core.get_cdn_manifest(game, platform=args.platform)
+            manifest_data, _, _, manifest_secrets = self.core.get_cdn_manifest(game, platform=args.platform)
 
         manifest = self.core.load_manifest(manifest_data)
+        if not manifest.decrypt(manifest_secrets):
+            logger.warning('Manifest key wasn\'t found. File names will be obfuscated')
+
         files = sorted(manifest.file_manifest_list.elements,
                        key=lambda a: a.filename.lower())
 
@@ -576,9 +579,9 @@ class LegendaryCLI:
             args.reset = args.download = args.disable_version_check = False
             self.crossover_setup(args)
 
-        if args.origin:
-            return self._launch_origin(args)
-
+        if args.origin or args.ubisoft:
+            return self._launch_third_party(args)
+        
         igame = self.core.get_installed_game(app_name)
         if (not igame or not igame.executable) and (game := self.core.get_game(app_name)) is not None:
             # override installed game with base title
@@ -714,17 +717,17 @@ class LegendaryCLI:
             if params.environment:
                 logger.debug('Environment overrides: {}'.format(', '.join(
                     f'{k}={v}' for k, v in params.environment.items())))
-            subprocess.Popen(full_params, cwd=params.working_directory, env=full_env)
+            subprocess.Popen(full_params, cwd=params.working_directory, env=full_env, shell=os.name == 'nt')
 
-    def _launch_origin(self, args):
+    def _launch_third_party(self, args):
         game = self.core.get_game(app_name=args.app_name)
         if not game:
             logger.error(f'Unknown game "{args.app_name}", run "legendary list-games --third-party" '
                          f'to fetch data for Origin titles before using this command.')
             return
 
-        if not game.is_origin_game:
-            logger.error(f'The specified game is not an Origin title.')
+        if not game.is_origin_game and not game.is_ubisoft_game:
+            logger.error(f'The specified game is not an Origin or Ubisoft title.')
             return
 
         # login is not required to launch the game, but linking does require it.
@@ -734,9 +737,10 @@ class LegendaryCLI:
                 logger.error('Login failed, cannot continue!')
                 exit(1)
 
-        origin_uri = self.core.get_origin_uri(args.app_name, args.offline)
+        uri = self.core.get_origin_uri(args.app_name, args.offline) if game.is_origin_game else self.core.get_ubisoft_uri(args.app_name, args.offline)
         if args.json:
-            return self._print_json(dict(uri=origin_uri), args.pretty_json)
+            self._print_json(dict(uri=uri), args.pretty_json)
+            return
 
         if os.name == 'nt':
             cmd, wait_for_exit = self.core.get_pre_launch_command(args.app_name)
@@ -744,7 +748,7 @@ class LegendaryCLI:
             if args.dry_run:
                 if cmd:
                     logger.info(f'Pre-launch command: {cmd}')
-                logger.info(f'Origin URI: {origin_uri}')
+                logger.info(f'URI: {uri}')
             else:
                 if cmd:
                     try:
@@ -756,8 +760,8 @@ class LegendaryCLI:
                     except Exception as e:
                         logger.warning(f'Pre-launch command failed: {e!r}')
 
-                logger.debug(f'Opening Origin URI: {origin_uri}')
-                webbrowser.open(origin_uri)
+                logger.debug(f'Opening URI: {uri}')
+                webbrowser.open(uri)
             return
 
         # on linux, require users to specify at least the wine binary and prefix in config or command line
@@ -788,17 +792,17 @@ class LegendaryCLI:
                 logger.info(f'Using CrossOver Bottle "{bottle_name}"')
 
         if not command:
-            logger.error(f'In order to launch Origin correctly you must specify a prefix and wine binary or '
+            logger.error(f'In order to launch correctly you must specify a prefix and wine binary or '
                          f'wrapper in the configuration file or command line. See the README for details.')
             return
 
         # You cannot launch a URI without start.exe
         command.append('start')
-        command.append(origin_uri)
+        command.append(uri)
         if args.dry_run:
             if cmd:
                 logger.info(f'Pre-launch command: {cmd}')
-            logger.info(f'Origin launch command: {shlex.join(command)}')
+            logger.info(f'Launch command: {shlex.join(command)}')
         else:
             if cmd:
                 try:
@@ -810,7 +814,7 @@ class LegendaryCLI:
                 except Exception as e:
                     logger.warning(f'Pre-launch command failed: {e!r}')
 
-            logger.debug(f'Opening Origin URI with command: {shlex.join(command)}')
+            logger.debug(f'Opening URI with command: {shlex.join(command)}')
             subprocess.Popen(command, env=full_env)
 
     def install_game(self, args):
@@ -1224,6 +1228,8 @@ class LegendaryCLI:
             return
 
         manifest_data, _ = self.core.get_installed_manifest(args.app_name)
+        manifest_secrets = dict()
+        
         if manifest_data is None:
             if repair_mode:
                 if not repair_online:
@@ -1232,7 +1238,7 @@ class LegendaryCLI:
 
                 logger.warning('No manifest could be loaded, the file may be missing. Downloading the latest manifest.')
                 game = self.core.get_game(args.app_name, platform=igame.platform)
-                manifest_data, _ = self.core.get_cdn_manifest(game, igame.platform)
+                manifest_data, _, _, manifest_secrets = self.core.get_cdn_manifest(game, igame.platform)
             else:
                 logger.critical(f'Manifest appears to be missing! To repair, run "legendary repair '
                                 f'{args.app_name} --repair-and-update", this will however redownload all files '
@@ -1240,6 +1246,9 @@ class LegendaryCLI:
                 return
 
         manifest = self.core.load_manifest(manifest_data)
+        if not manifest.decrypt(manifest_secrets):
+            logger.critical('Unable to decrypt the manifest. The key appears to be missing. Please report this on GitHub.')
+            return
 
         files = sorted(manifest.file_manifest_list.elements,
                        key=lambda a: a.filename.lower())
@@ -1268,7 +1277,8 @@ class LegendaryCLI:
 
         logger.info(f'Verifying "{igame.title}" version "{manifest.meta.build_version}"')
         repair_file = []
-        for result, path, result_hash, bytes_read in validate_files(igame.install_path, file_list):
+        for result, path, result_hash, bytes_read in validate_files(igame.install_path, file_list,
+                                                                    case_insensitive=igame.platform.startswith('Win')):
             processed += bytes_read
             percentage = (processed / total_size) * 100.0
             num += 1
@@ -1643,7 +1653,9 @@ class LegendaryCLI:
             args.offline = True
 
         manifest_data = None
-        entitlements = None
+        entitlements = []
+        is_preloaded = False
+        manifest_secrets = dict()
         # load installed manifest or URI
         if args.offline or manifest_uri:
             if app_name and self.core.is_installed(app_name):
@@ -1658,13 +1670,12 @@ class LegendaryCLI:
             else:
                 logger.info('Game not installed and offline mode enabled, cannot load manifest.')
         elif game:
-            entitlements = self.core.egs.get_user_entitlements_full()
+            entitlements = self.core.lgd.entitlements if self.core.lgd.entitlements else []
             egl_meta = self.core.egs.get_game_info(game.namespace, game.catalog_item_id)
             game.metadata = egl_meta
             # Get manifest if asset exists for current platform
             if args.platform in game.asset_infos:
-                manifest_data, _ = self.core.get_cdn_manifest(game, args.platform)
-
+                manifest_data, _, is_preloaded, manifest_secrets = self.core.get_cdn_manifest(game, args.platform)
         if game:
             game_infos = info_items['game']
             game_infos.append(InfoItem('App name', 'app_name', game.app_name, game.app_name))
@@ -1673,6 +1684,10 @@ class LegendaryCLI:
                                        game.app_version(args.platform)))
             all_versions = {k: v.build_version for k, v in game.asset_infos.items()}
             game_infos.append(InfoItem('All versions', 'platform_versions', all_versions, all_versions))
+            # Grant date from entitlements
+            entitlement = next((ent for ent in entitlements if ent['namespace'] == game.namespace), None)
+            grant_date = entitlement["grantDate"] if entitlement else game.metadata["creationDate"]
+            game_infos.append(InfoItem('Grant date', 'grant_date', grant_date, grant_date))
             # Cloud save support for Mac and Windows
             game_infos.append(InfoItem('Cloud saves supported', 'cloud_saves_supported',
                                        game.supports_cloud_saves or game.supports_mac_cloud_saves,
@@ -1720,7 +1735,7 @@ class LegendaryCLI:
             # list all owned DLC based on entitlements
             if entitlements and not game.is_dlc:
                 owned_entitlements = {i['entitlementName'] for i in entitlements}
-                owned_app_names = {g.app_name for g in self.core.get_assets(args.platform)}
+                owned_app_names = {g.app_name for g in self.core.get_assets(platform=args.platform)}
                 owned_dlc = []
                 for dlc in game.metadata.get('dlcItemList', []):
                     installable = dlc.get('releaseInfo', None)
@@ -1788,6 +1803,8 @@ class LegendaryCLI:
         if manifest_data:
             manifest_info = info_items['manifest']
             manifest = self.core.load_manifest(manifest_data)
+            manifest.decrypt(manifest_secrets)
+
             manifest_size = len(manifest_data)
             manifest_size_human = f'{manifest_size / 1024:.01f} KiB'
             manifest_info.append(InfoItem('Manifest size', 'size', manifest_size_human, manifest_size))
@@ -1796,6 +1813,8 @@ class LegendaryCLI:
             manifest_info.append(InfoItem('Manifest version', 'version', manifest.version, manifest.version))
             manifest_info.append(InfoItem('Manifest feature level', 'feature_level',
                                           manifest.meta.feature_level, manifest.meta.feature_level))
+            manifest_info.append(InfoItem('Manifest compressed', 'compressed', bool(manifest.compressed), bool(manifest.compressed)))
+            manifest_info.append(InfoItem('Manifest encrypted', 'encrypted', bool(manifest.encrypted), bool(manifest.encrypted)))
             manifest_info.append(InfoItem('Manifest app name', 'app_name', manifest.meta.app_name,
                                           manifest.meta.app_name))
             manifest_info.append(InfoItem('Launch EXE', 'launch_exe',
@@ -1892,6 +1911,7 @@ class LegendaryCLI:
                                           tag_disk_size_human or 'N/A', tag_disk_size))
             manifest_info.append(InfoItem('Download size by install tag', 'tag_download_size',
                                           tag_download_size_human or 'N/A', tag_download_size))
+            manifest_info.append(InfoItem('Is preload', 'is_preloaded', is_preloaded, is_preloaded))
 
         if not args.json:
             def print_info_item(item: InfoItem):
@@ -2047,7 +2067,7 @@ class LegendaryCLI:
             redeemed = {k['gameId'] for k in key_list if k['redeemedOnUplay']}
 
             games = self.core.get_game_list()
-            entitlements = self.core.egs.get_user_entitlements_full()
+            entitlements = self.core.lgd.entitlements if self.core.lgd.entitlements else []
             owned_entitlements = {i['entitlementName'] for i in entitlements}
 
             uplay_games = []
@@ -2626,6 +2646,53 @@ class LegendaryCLI:
         self.core.install_game(igame)
         logger.info('Finished.')
 
+    def achievements(self, args):
+        if not self.core.login():
+            logger.error('Login failed! Unable to check for EULAs.')
+            exit(1)
+
+        app_name = self._resolve_aliases(args.app_name)
+        game = self.core.get_game(app_name, update_meta=True)
+        if not game:
+            logger.error(f'No game found for "{app_name}"')
+            return
+
+        achievements = self.core.get_achievements(game, update=True)
+        if not achievements:
+            logger.info(f'No achievements found for "{game.app_name}"')
+            return
+
+        if args.json:
+            self._print_json(achievements, args.pretty_json)
+            return
+
+        print(f'* Achievements for "{game.app_title}"')
+        print(f'  Total achievements: {achievements["total_achievements"]}')
+        print(f'  Completed achievements: {achievements["user_unlocked"]}')
+        print(f'  Total XP: {achievements["total_product_xp"]}')
+        print(f'  Player XP: {achievements["user_xp"]}')
+        print(f'  Player awards: {achievements["user_awards"]}')
+
+        for group, title in zip(
+            (achievements['completed'], achievements['in_progress'], achievements['uninitiated']),
+            ('Completed', 'In progress', 'Uninitiated')
+        ):
+            print(f'* {title}')
+            for a in group:
+                print(' - {display_name} | {xp}XP | {description} | Progress: {progress:.1%} | Completed on: {unlock_date}'.format(**a))
+
+        if args.show_hidden:
+            print('* Hidden')
+            for a in achievements['hidden']:
+                print(' - {display_name} | {xp}XP | {description} | Progress: {progress:.1%} | Completed on: {unlock_date}'.format(**a))
+
+        count = sum(
+            map(len, (achievements['completed'], achievements['in_progress'], achievements['uninitiated'], achievements['hidden']))
+        )
+        logger.info(f'Found {count} achievements')
+
+        return
+
 
 def main():
     # Set output encoding to UTF-8 if not outputting to a terminal
@@ -2680,6 +2747,7 @@ def main():
     uninstall_parser = subparsers.add_parser('uninstall', help='Uninstall (delete) a game')
     verify_parser = subparsers.add_parser('verify', help='Verify a game\'s local files',
                                           aliases=('verify-game',), hide_aliases=True)
+    achievements_parser = subparsers.add_parser('achievements', help='List achievement status for a given game')
 
     # hidden commands have no help text
     get_token_parser = subparsers.add_parser('get-token')
@@ -2826,6 +2894,8 @@ def main():
                                help='Override executable to launch (relative path)')
     launch_parser.add_argument('--origin', dest='origin', action='store_true',
                                help='Launch Origin to activate or run the game.')
+    launch_parser.add_argument('--ubisoft', dest='ubisoft', action='store_true',
+                               help='Launch Ubisoft to install and run the game.')
     launch_parser.add_argument('--json', dest='json', action='store_true',
                                help='Print launch information as JSON and exit')
 
@@ -3013,6 +3083,12 @@ def main():
     move_parser.add_argument('--skip-move', dest='skip_move', action='store_true',
                              help='Only change legendary database, do not move files (e.g. if already moved)')
 
+    achievements_parser.add_argument('app_name', metavar='<App Name>', help='Name of the app')
+    achievements_parser.add_argument('--hidden', dest='show_hidden', action='store_true',
+                                     help='Show undiscovered achievements (may contain spoilers)')
+    achievements_parser.add_argument('--json', dest='json', action='store_true',
+                                     help='Output information in JSON format')
+
     args, extra = parser.parse_known_args()
 
     if args.version:
@@ -3113,6 +3189,8 @@ def main():
             cli.crossover_setup(args)
         elif args.subparser_name == 'move':
             cli.move(args)
+        elif args.subparser_name == 'achievements':
+            cli.achievements(args)
     except KeyboardInterrupt:
         logger.info('Command was aborted via KeyboardInterrupt, cleaning up...')
 

@@ -37,6 +37,8 @@ class LGDLFS:
         self._user_data = None
         # EGS entitlements
         self._entitlements = None
+        # EGS achievements
+        self._achievements = None
         # EGS asset data
         self._assets = None
         # EGS metadata
@@ -197,6 +199,27 @@ class LGDLFS:
                   indent=2, sort_keys=True)
 
     @property
+    def achievements(self):
+        if self._achievements is not None:
+            return self._achievements
+
+        try:
+            self._achievements = json.load(open(os.path.join(self.path, 'achievements.json')))
+            return self._achievements
+        except Exception as e:
+            self.log.debug(f'Failed to load achievements data: {e!r}')
+            return None
+
+    @achievements.setter
+    def achievements(self, achievements):
+        if achievements is None:
+            raise ValueError('Achievements is none!')
+
+        self._achievements = achievements
+        json.dump(achievements, open(os.path.join(self.path, 'achievements.json'), 'w'),
+                  indent=2, sort_keys=True)
+
+    @property
     def assets(self):
         if self._assets is None:
             try:
@@ -235,9 +258,9 @@ class LGDLFS:
             except FileNotFoundError:  # all other errors should propagate
                 return None
 
-    def save_manifest(self, app_name, manifest_data, version, platform='Windows'):
+    def save_manifest(self, app_name, manifest, version, platform='Windows'):
         with open(self._get_manifest_filename(app_name, version, platform), 'wb') as f:
-            f.write(manifest_data)
+            manifest.write(f)
 
     def get_game_meta(self, app_name):
         if _meta := self._game_metadata.get(app_name, None):
